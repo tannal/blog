@@ -273,13 +273,20 @@ function CommentSection({ postId }: { postId: string }) {
   }
 
   const handleLike = async (comment: DbComment) => {
-    if (likedIds.has(comment.id)) return
-    setLikedIds(prev => new Set([...prev, comment.id]))
-    // Optimistic
-    setComments(prev => prev.map(c => c.id === comment.id ? { ...c, likes: c.likes + 1 } : c))
+    const isLiked = likedIds.has(comment.id)
+    const delta = isLiked ? -1 : 1
+    // Optimistic update
+    setLikedIds(prev => {
+      const next = new Set(prev)
+      isLiked ? next.delete(comment.id) : next.add(comment.id)
+      return next
+    })
+    setComments(prev => prev.map(c =>
+      c.id === comment.id ? { ...c, likes: Math.max(0, c.likes + delta) } : c
+    ))
     await supabase
       .from('comments')
-      .update({ likes: comment.likes + 1 })
+      .update({ likes: Math.max(0, comment.likes + delta) })
       .eq('id', comment.id)
   }
 
@@ -368,7 +375,7 @@ function CommentSection({ postId }: { postId: string }) {
                   >
                     <Heart size={13} className={likedIds.has(comment.id) ? 'fill-violet-500' : ''} />
                     {comment.likes > 0 && <span>{comment.likes}</span>}
-                    <span>{likedIds.has(comment.id) ? '已点赞' : '点赞'}</span>
+                    <span>{likedIds.has(comment.id) ? '取消点赞' : '点赞'}</span>
                   </button>
                 </div>
               </div>

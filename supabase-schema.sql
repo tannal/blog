@@ -34,11 +34,14 @@ CREATE POLICY "comments_insert_public"
     length(trim(content)) BETWEEN 1 AND 2000
   );
 
--- 任何人都可以点赞（只允许 likes 字段 +1，防止乱改）
+-- 任何人都可以点赞/取消点赞（likes 只允许 ±1，防止乱改）
 CREATE POLICY "comments_update_likes"
   ON comments FOR UPDATE
   USING (true)
-  WITH CHECK (likes = (SELECT likes FROM comments WHERE id = comments.id) + 1);
+  WITH CHECK (
+    likes = (SELECT likes FROM comments WHERE id = comments.id) + 1 OR
+    likes = (SELECT likes FROM comments WHERE id = comments.id) - 1
+  );
 
 -- 4. 开启实时订阅（Realtime）
 ALTER PUBLICATION supabase_realtime ADD TABLE comments;
