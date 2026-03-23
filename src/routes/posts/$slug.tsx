@@ -1,7 +1,8 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Clock, Eye, Tag, ArrowLeft, Heart, Share2, MessageSquare, Send } from 'lucide-react'
-import { fetchPost, fetchComments, fetchPosts, type Post, type Comment } from '../../data/blog'
+import { fetchPost, fetchPosts, type Post } from '../../data/blog'
+import { supabase, type DbComment } from '../../lib/supabase'
 
 export const Route = createFileRoute('/posts/$slug')({
   component: PostPage,
@@ -14,6 +15,10 @@ type Block =
   | { type: 'ul'; items: string[] }
   | { type: 'p'; text: string }
   | { type: 'spacer' }
+
+function slugify(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w\u4e00-\u9fa5-]/g, '')
+}
 
 function parseMarkdown(content: string): Block[] {
   const lines = content.split('\n')
@@ -136,11 +141,11 @@ function MarkdownRenderer({ content }: { content: string }) {
       {blocks.map((block, i) => {
         switch (block.type) {
           case 'h1':
-            return <h1 key={i} className="text-3xl font-extrabold text-gray-900 mt-8 mb-4">{block.text}</h1>
+            return <h1 key={i} id={slugify(block.text)} className="text-3xl font-extrabold text-gray-900 mt-8 mb-4 scroll-mt-24">{block.text}</h1>
           case 'h2':
-            return <h2 key={i} className="text-2xl font-bold text-gray-900 mt-7 mb-3 pb-2 border-b border-gray-100">{block.text}</h2>
+            return <h2 key={i} id={slugify(block.text)} className="text-2xl font-bold text-gray-900 mt-7 mb-3 pb-2 border-b border-gray-100 scroll-mt-24">{block.text}</h2>
           case 'h3':
-            return <h3 key={i} className="text-xl font-bold text-gray-800 mt-6 mb-2">{block.text}</h3>
+            return <h3 key={i} id={slugify(block.text)} className="text-xl font-bold text-gray-800 mt-6 mb-2 scroll-mt-24">{block.text}</h3>
           case 'code':
             return <CodeBlock key={i} lang={block.lang} lines={block.lines} />
           case 'ul':
@@ -168,37 +173,114 @@ function MarkdownRenderer({ content }: { content: string }) {
 
 
 function CommentSection({ postId }: { postId: string }) {
-  const [comments, setComments] = useState<Comment[]>([])
+  const [comments, setComments] = useState<DbComment[]>([])
   const [loading, setLoading] = useState(true)
   const [newComment, setNewComment] = useState('')
   const [author, setAuthor] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set())
 
+  // Load comments from Supabase
   useEffect(() => {
-    fetchComments(postId).then(setComments).finally(() => setLoading(false))
+    setLoading(true)
+    supabase
+      .from('comments')
+      .select('*')
+      .eq('post_id', postId)
+      .order('created_at', { ascending: true })
+      .then(({ data, error }) => {
+        if (error) console.error('Failed to load comments:', error)
+        else setComments(data ?? [])
+        setLoading(false)
+      })
+  }, [postId])
+
+  // Realtime subscription: new comments appear instantly
+  useEffect(() => {
+    const channel = supabase
+      .channel(`comments:${postId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'comments', filter: `post_id=eq.${postId}` },
+        (payload) => {
+          setComments(prev => {
+            // avoid duplicate if it was optimistically added
+            if (prev.some(c => c.id === payload.new.id)) return prev
+            return [...prev, payload.new as DbComment]
+          })
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'comments', filter: `post_id=eq.${postId}` },
+        (payload) => {
+          setComments(prev => prev.map(c => c.id === payload.new.id ? payload.new as DbComment : c))
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
   }, [postId])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!newComment.trim() || !author.trim()) return
     setSubmitting(true)
-    await new Promise(r => setTimeout(r, 600))
-    const comment: Comment = {
-      id: Date.now().toString(),
-      postId,
+    setError(null)
+
+    const optimistic: DbComment = {
+      id: `optimistic-${Date.now()}`,
+      post_id: postId,
       author: author.trim(),
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(author)}`,
+      avatar_url: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(author.trim())}`,
       content: newComment.trim(),
-      createdAt: new Date().toISOString().split('T')[0],
       likes: 0,
+      created_at: new Date().toISOString(),
     }
-    setComments(prev => [...prev, comment])
+
+    // Optimistic update
+    setComments(prev => [...prev, optimistic])
     setNewComment('')
     setAuthor('')
+
+    const { data, error: insertError } = await supabase
+      .from('comments')
+      .insert({
+        post_id: postId,
+        author: optimistic.author,
+        avatar_url: optimistic.avatar_url,
+        content: optimistic.content,
+        likes: 0,
+      })
+      .select()
+      .single()
+
+    if (insertError) {
+      // Rollback optimistic update
+      setComments(prev => prev.filter(c => c.id !== optimistic.id))
+      setNewComment(optimistic.content)
+      setAuthor(optimistic.author)
+      setError('评论发送失败，请稍后重试')
+    } else {
+      // Replace optimistic with real data
+      setComments(prev => prev.map(c => c.id === optimistic.id ? data : c))
+      setSubmitted(true)
+      setTimeout(() => setSubmitted(false), 3000)
+    }
     setSubmitting(false)
-    setSubmitted(true)
-    setTimeout(() => setSubmitted(false), 3000)
+  }
+
+  const handleLike = async (comment: DbComment) => {
+    if (likedIds.has(comment.id)) return
+    setLikedIds(prev => new Set([...prev, comment.id]))
+    // Optimistic
+    setComments(prev => prev.map(c => c.id === comment.id ? { ...c, likes: c.likes + 1 } : c))
+    await supabase
+      .from('comments')
+      .update({ likes: comment.likes + 1 })
+      .eq('id', comment.id)
   }
 
   return (
@@ -231,6 +313,9 @@ function CommentSection({ postId }: { postId: string }) {
           <div className="flex items-center justify-between">
             {submitted && (
               <span className="text-green-600 text-sm font-medium">✓ 评论发表成功！</span>
+            )}
+            {error && (
+              <span className="text-red-500 text-sm">{error}</span>
             )}
             <button
               type="submit"
@@ -270,17 +355,20 @@ function CommentSection({ postId }: { postId: string }) {
           {comments.map(comment => (
             <div key={comment.id} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
               <div className="flex items-start gap-4">
-                <img src={comment.avatar} alt={comment.author} className="w-10 h-10 rounded-full flex-shrink-0" />
+                <img src={comment.avatar_url} alt={comment.author} className="w-10 h-10 rounded-full flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between mb-2">
                     <span className="font-semibold text-gray-900 text-sm">{comment.author}</span>
-                    <span className="text-xs text-gray-400">{comment.createdAt}</span>
+                    <span className="text-xs text-gray-400">{comment.created_at.slice(0, 10)}</span>
                   </div>
                   <p className="text-gray-700 text-sm leading-relaxed">{comment.content}</p>
-                  <button className="mt-3 flex items-center gap-1.5 text-xs text-gray-400 hover:text-violet-500 transition-colors">
-                    <Heart size={13} />
+                  <button
+                    onClick={() => handleLike(comment)}
+                    className={`mt-3 flex items-center gap-1.5 text-xs transition-colors ${likedIds.has(comment.id) ? 'text-violet-500' : 'text-gray-400 hover:text-violet-500'}`}
+                  >
+                    <Heart size={13} className={likedIds.has(comment.id) ? 'fill-violet-500' : ''} />
                     {comment.likes > 0 && <span>{comment.likes}</span>}
-                    <span>点赞</span>
+                    <span>{likedIds.has(comment.id) ? '已点赞' : '点赞'}</span>
                   </button>
                 </div>
               </div>
@@ -291,6 +379,73 @@ function CommentSection({ postId }: { postId: string }) {
     </section>
   )
 }
+
+function TocPanel({ content }: { content: string }) {
+  const [activeId, setActiveId] = useState<string>('')
+
+  const headings = useMemo(() => {
+    return content.split('\n')
+      .filter(line => line.match(/^#{1,3} /))
+      .map(line => {
+        const level = line.match(/^(#{1,3})/)?.[1].length ?? 2
+        const text = line.replace(/^#{1,3} /, '')
+        return { text, level, id: slugify(text) }
+      })
+  }, [content])
+
+  // Highlight active heading on scroll
+  useEffect(() => {
+    if (headings.length === 0) return
+    const observer = new IntersectionObserver(
+      entries => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) setActiveId(entry.target.id)
+        })
+      },
+      { rootMargin: '-80px 0px -60% 0px', threshold: 0 }
+    )
+    headings.forEach(({ id }) => {
+      const el = document.getElementById(id)
+      if (el) observer.observe(el)
+    })
+    return () => observer.disconnect()
+  }, [headings])
+
+  const handleClick = (id: string) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setActiveId(id)
+  }
+
+  if (headings.length === 0) return null
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+      <h3 className="font-bold text-gray-900 mb-4">文章目录</h3>
+      <ul className="space-y-1">
+        {headings.map(({ text, level, id }) => (
+          <li key={id}>
+            <button
+              onClick={() => handleClick(id)}
+              className={`w-full text-left text-sm flex items-center gap-2 px-2 py-1.5 rounded-lg transition-all ${
+                activeId === id
+                  ? 'text-violet-600 bg-violet-50 font-medium'
+                  : 'text-gray-600 hover:text-violet-600 hover:bg-gray-50'
+              } ${level === 3 ? 'pl-6' : level === 1 ? 'pl-0' : 'pl-2'}`}
+            >
+              <span className={`rounded-full flex-shrink-0 transition-colors ${
+                activeId === id ? 'bg-violet-500' : 'bg-violet-200'
+              } ${level === 1 ? 'w-2 h-2' : level === 2 ? 'w-1.5 h-1.5' : 'w-1 h-1'}`} />
+              <span className="flex-1 truncate">{text}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 
 function PostPage() {
   const { slug } = Route.useParams()
@@ -466,19 +621,7 @@ function PostPage() {
             )}
 
             {/* Table of Contents */}
-            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-              <h3 className="font-bold text-gray-900 mb-4">文章目录</h3>
-              <ul className="space-y-2">
-                {post.content.split('\n')
-                  .filter(line => line.startsWith('## '))
-                  .map((line, i) => (
-                    <li key={i} className="text-sm text-gray-600 hover:text-violet-600 cursor-pointer flex items-center gap-2 transition-colors">
-                      <span className="w-1.5 h-1.5 bg-violet-300 rounded-full flex-shrink-0" />
-                      {line.slice(3)}
-                    </li>
-                  ))}
-              </ul>
-            </div>
+            <TocPanel content={post.content} />
           </div>
         </aside>
       </div>

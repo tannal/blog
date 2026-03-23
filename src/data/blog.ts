@@ -5,16 +5,6 @@ export interface Author {
   bio: string
 }
 
-export interface Comment {
-  id: string
-  postId: string
-  author: string
-  avatar: string
-  content: string
-  createdAt: string
-  likes: number
-}
-
 export interface PostMeta {
   title: string
   excerpt: string
@@ -148,39 +138,4 @@ export async function fetchPosts(filters?: {
 export async function fetchPost(slug: string): Promise<Post | undefined> {
   await new Promise(r => setTimeout(r, 50))
   return ALL_POSTS.find(p => p.slug === slug)
-}
-
-export const STORED_COMMENTS: Comment[] = [
-  {
-    id: '1',
-    postId: 'tanstack-router-deep-dive',
-    author: '王小明',
-    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Wang',
-    content: '非常详细的文章！TanStack Router 的类型安全特性确实解决了我们团队的很多痛点。',
-    createdAt: '2025-03-16',
-    likes: 12,
-  },
-  {
-    id: '2',
-    postId: 'tanstack-router-deep-dive',
-    author: '李思远',
-    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Li',
-    content: '请问文件路由和传统路由定义哪个更推荐？我们项目是从 React Router 迁移过来的。',
-    createdAt: '2025-03-17',
-    likes: 5,
-  },
-  {
-    id: '3',
-    postId: 'kubernetes-production-best-practices',
-    author: '孙建华',
-    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sun',
-    content: '关于 Resource Limits 的设置有没有推荐的工具？手动设置感觉不太准确。',
-    createdAt: '2025-03-11',
-    likes: 15,
-  },
-]
-
-export async function fetchComments(postId: string): Promise<Comment[]> {
-  await new Promise(r => setTimeout(r, 80))
-  return STORED_COMMENTS.filter(c => c.postId === postId)
 }
